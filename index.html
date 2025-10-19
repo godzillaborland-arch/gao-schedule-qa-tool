@@ -45,6 +45,14 @@
         <!-- File Input and Controls -->
         <div class="bg-white p-6 rounded-xl container-card mb-10">
             <h2 class="text-2xl font-semibold text-gray-800 mb-4">1. Load Schedule Data</h2>
+            
+            <!-- Status Date Input -->
+            <div class="mb-6">
+                <label for="statusDate" class="block text-sm font-medium text-gray-700 mb-1">Project Status Date (For Overdue Check)</label>
+                <input type="date" id="statusDate" value="" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-2 border">
+                <p class="text-xs text-gray-500 mt-1">This date is the 'ActiveProject.CurrentDate' from your VBA script.</p>
+            </div>
+
             <div class="flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-4">
                 <input type="file" id="scheduleFile" accept=".csv, .tsv" class="block w-full text-sm text-gray-500
                     file:mr-4 file:py-2 file:px-4
@@ -73,8 +81,8 @@
                     <p class="text-sm text-red-600 font-medium">Critical Findings</p>
                 </div>
                 <div class="bg-yellow-50 p-4 rounded-xl text-center">
-                    <p class="text-3xl font-bold text-yellow-700" id="hardConstraints">0</p>
-                    <p class="text-sm text-yellow-600 font-medium">Hard Constraints</p>
+                    <p class="text-3xl font-bold text-yellow-700" id="highPriorityFindings">0</p>
+                    <p class="text-sm text-yellow-600 font-medium">High Priority Findings</p>
                 </div>
                 <div class="bg-green-50 p-4 rounded-xl text-center">
                     <p class="text-3xl font-bold text-green-700" id="passingChecks">0</p>
@@ -108,6 +116,7 @@
         const fileInput = document.getElementById('scheduleFile');
         const runAuditBtn = document.getElementById('runAuditBtn');
         const fileStatus = document.getElementById('fileStatus');
+        const statusDateInput = document.getElementById('statusDate');
         const summarySection = document.getElementById('summarySection');
         const detailsSection = document.getElementById('detailsSection');
         const findingCardsContainer = document.getElementById('findingCardsContainer');
@@ -116,17 +125,22 @@
         
         let rawFileContent = null;
         let totalTaskCount = 0;
+        let hasPercentCompleteColumn = false; // Flag to track optional column
 
         // Map GAO checks to visual categories
         const CHECK_MAP = {
             'Dangling_Activities': { title: 'Dangling Activities (BP 2)', color: 'bg-red-500', icon: '🔗' },
+            'Negative_Slack_Tasks': { title: 'Negative Slack (BP 5)', color: 'bg-red-500', icon: '🔻' },
+            'Overdue_Tasks': { title: 'Potential Overdue (VBA Check)', color: 'bg-red-500', icon: '🚨' },
             'Hard_Constraints': { title: 'Hard Constraints (BP 10)', color: 'bg-yellow-500', icon: '🔒' },
+            'Manual_Tasks': { title: 'Manual Tasks (VBA Check)', color: 'bg-yellow-500', icon: '✍️' },
+            'Task_Name_Short': { title: 'Task Name Too Short (<10 Chars)', color: 'bg-yellow-500', icon: '✂️' },
             'Long_Duration_Tasks': { title: 'Long Duration (>60d) (BP 4)', color: 'bg-yellow-500', icon: '⏳' },
             'Estimated_Duration_Tasks': { title: 'Estimated Durations (?) (BP 4)', color: 'bg-yellow-500', icon: '❓' },
             'Zero_Duration_Non_Milestones': { title: 'Zero Duration Non-Milestones (BP 4)', color: 'bg-yellow-500', icon: '🛑' },
-            'Negative_Slack_Tasks': { title: 'Negative Slack (BP 5)', color: 'bg-red-500', icon: '🔻' },
             'High_Slack_Tasks': { title: 'High Slack (>100d) (BP 5)', color: 'bg-yellow-500', icon: '⬆️' },
-            'Critical_Path_Tasks': { title: 'Critical Path Tasks (Slack=0)', color: 'bg-green-500', icon: '🟢' }
+            'Critical_Path_Tasks': { title: 'Critical Path Tasks (Slack=0)', color: 'bg-green-500', icon: '🟢' },
+            'Skipped_Overdue_Tasks': { title: 'Potential Overdue Check SKIPPED', color: 'bg-gray-400', icon: '🚫' } // New entry for skipped check
         };
 
         // --- Utility Functions ---
@@ -136,17 +150,45 @@
             if (typeof value === 'number') return value;
             
             let cleaned = String(value).trim();
-            if (cleaned === 'NA' || cleaned === '') return 0;
+            if (cleaned === 'NA' || cleaned === '' || cleaned === 'd?') return 0; // Added 'd?' cleanup
 
-            // Remove non-numeric characters like "days", "?", "d", etc.
+            // Remove non-numeric characters like " days", "?", "d", etc.
             cleaned = cleaned.replace(/ days?|\?|d/gi, '').trim();
 
             const num = parseFloat(cleaned);
             return isNaN(num) ? 0 : num;
         }
 
+        /**
+         * Converts various string representations of percentage (e.g., '50%', '0.5') to a number.
+         */
+        function cleanPercentComplete(value) {
+            if (value === null || value === undefined || value === '') return 0;
+            if (typeof value === 'number') return value;
+
+            let cleaned = String(value).trim();
+            
+            // If it contains a percentage sign, treat it as percentage
+            if (cleaned.includes('%')) {
+                cleaned = cleaned.replace('%', '');
+                const num = parseFloat(cleaned);
+                // Return as an integer (50 for 50%)
+                return isNaN(num) ? 0 : num; 
+            }
+            
+            // If it's a decimal (e.g., 0.5 for 50%), convert to percentage integer
+            if (cleaned.startsWith('0.')) {
+                const num = parseFloat(cleaned);
+                return isNaN(num) ? 0 : Math.round(num * 100);
+            }
+
+            // Otherwise, assume it's already an integer percentage
+            const num = parseInt(cleaned);
+            return isNaN(num) ? 0 : num;
+        }
+
         function showMessageBox(message) {
-            messageContent.textContent = message;
+            messageContent.innerHTML = message; // Use innerHTML for formatting
             messageBox.classList.remove('hidden');
             messageBox.classList.add('flex');
         }
@@ -161,18 +203,42 @@
         fileInput.addEventListener('change', () => {
             if (fileInput.files.length > 0) {
                 fileStatus.textContent = `File selected: ${fileInput.files[0].name}`;
-                runAuditBtn.disabled = false;
+                // Only enable the button if a date is also set (or if the date is set later)
+                if (statusDateInput.value) {
+                    runAuditBtn.disabled = false;
+                }
             } else {
                 fileStatus.textContent = 'No file selected.';
                 runAuditBtn.disabled = true;
             }
         });
+        
+        statusDateInput.addEventListener('change', () => {
+             if (fileInput.files.length > 0 && statusDateInput.value) {
+                runAuditBtn.disabled = false;
+            } else {
+                runAuditBtn.disabled = true;
+            }
+        });
+
 
         function processFile() {
             const file = fileInput.files[0];
+            const statusDateStr = statusDateInput.value;
+            
             if (!file) {
                 showMessageBox("Please select a file to process.");
                 return;
+            }
+            if (!statusDateStr) {
+                showMessageBox("Please set the Project Status Date (VBA's ActiveProject.CurrentDate) to enable the Overdue check.");
+                return;
+            }
+
+            const statusDate = new Date(statusDateStr);
+            if (isNaN(statusDate)) {
+                 showMessageBox("Invalid Status Date format.");
+                 return;
             }
 
             // Check for file type (simple check)
@@ -187,13 +253,14 @@
                 rawFileContent = e.target.result;
                 const scheduleData = parseCSV(rawFileContent);
                 if (scheduleData.length > 0) {
-                    runGAOAudit(scheduleData);
+                    runGAOAudit(scheduleData, statusDate);
                 } else {
-                    // Check if the file content was actually empty
+                    // This block is now only hit if parseCSV couldn't read the header or the file was truly empty.
                     if (rawFileContent.trim().length === 0) {
                         showMessageBox("The file appears to be empty.");
                     } else {
-                        showMessageBox("Could not parse schedule data. The most likely reason is a mismatch between the data's delimiter (comma or tab) and how quoted fields are handled. Please confirm your file is a standard CSV or TSV.");
+                        // The more detailed error is now handled inside parseCSV if all data rows fail.
+                        console.log("Parsing failed, message already displayed by parseCSV.");
                     }
                 }
             };
@@ -206,14 +273,16 @@
         }
 
         /**
-         * Robust CSV/TSV parser that correctly handles fields enclosed in double quotes 
-         * which may contain the delimiter.
-         * @param {string} text - The entire file content.
+         * Hardened CSV/TSV parser that includes logic to search for the header line within the first few rows.
+         * * @param {string} text - The entire file content.
          * @returns {Array<Object>} The parsed data rows.
          */
         function parseCSV(text) {
-            // Split by line break, handling both LF and CRLF, and filter out empty lines
-            const lines = text.trim().split(/\r?\n/).filter(line => line.trim().length > 0);
+            // Reset flag
+            hasPercentCompleteColumn = false;
+            
+            // Normalize line endings to LF and filter out empty lines
+            const lines = text.trim().replace(/\r\n/g, '\n').split('\n').filter(line => line.trim().length > 0);
             if (lines.length <= 1) return [];
 
             // 1. Determine Delimiter (default to comma)
@@ -221,60 +290,186 @@
             if (lines[0].includes('\t')) {
                 delimiter = '\t';
             }
-            const delim_esc = delimiter === ',' ? ',' : '\t'; // Escaped delimiter for regex
+            // Escape the delimiter for use in a regular expression
+            const delim_esc = delimiter.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'); 
 
-            // 2. Create a robust parser function using the detected delimiter
-            // Regex explanation: 
-            // Splits on the delimiter only if it is followed by an even number of quotes, 
-            // ensuring the split happens outside of quoted fields.
-            const splitLine = (line) => {
-                // The pattern splits by the delimiter only if the delimiter is outside double quotes.
-                const regex = new RegExp(delim_esc + '(?=(?:(?:[^"]*"){2})*[^"]*$)', 'g');
-                // Split, then map to remove surrounding quotes and trim whitespace
-                return line.split(regex).map(field => field.replace(/^"|"$/g, '').trim()); 
+            // Hardened Regex for Matching: Matches (Quoted Content) OR (Unquoted Content)
+            const regex = new RegExp(`(?:^|${delim_esc})(?:"([^"]*(?:""[^"]*)*)"|([^${delim_esc}\n]*))`, 'g');
+
+
+            /**
+             * Extracts fields from a line using the hardened matching regex.
+             */
+            const splitLineRegex = (line) => {
+                let parts = [];
+                let match;
+                
+                // Reset regex for a new line
+                regex.lastIndex = 0; 
+                
+                // We use exec() in a loop to get all matches
+                while ((match = regex.exec(line)) !== null) {
+                    let field;
+                    if (match[1] !== undefined) {
+                        // Case 1: Quoted field. match[1] is content inside quotes. Handle double-quote escaping.
+                        field = match[1].replace(/""/g, '"');
+                    } else if (match[2] !== undefined) {
+                        // Case 2: Unquoted field.
+                        field = match[2];
+                    } else {
+                        // Case 3: Empty field 
+                        field = '';
+                    }
+
+                    // Trim and add to parts
+                    parts.push(field.trim());
+                }
+
+                return parts;
             };
             
-            // 3. Extract and standardize headers
-            const rawHeaders = splitLine(lines[0]);
+            /**
+             * Extracts fields using a simple split, for fallback purposes.
+             */
+            const splitLineSimple = (line) => {
+                // Simple split, then manually clean up quotes
+                return line.split(delimiter).map(field => field.replace(/^"|"$/g, '').trim());
+            }
+
             
-            const headers = rawHeaders.map(h => {
-                let clean = h.replace(/[^A-Za-z0-9_]+/g, '_').trim();
-                return clean.replace(/^_|_$/g, '');
-            });
-            
-            // Validate required columns (essential for the audit logic)
-            const required_cols = ['Unique_ID', 'Name', 'Duration', 'Predecessors', 'Successors', 
-                                   'Constraint_Type', 'Total_Slack', 'Milestone'];
-            const missing_cols = required_cols.filter(col => !headers.includes(col));
-            
-            if (missing_cols.length > 0) {
-                showMessageBox(`FATAL ERROR: Missing required columns in the file: ${missing_cols.join(', ')}. Please check your file's header names.`);
+            // 3. Search for the actual header line (robust to file titles/metadata)
+            let headerIndex = -1;
+            let rawHeaders = [];
+
+            // Search the first 5 lines for a valid header
+            for (let i = 0; i < Math.min(lines.length, 5); i++) {
+                // Try robust split first
+                let potentialHeaders = splitLineRegex(lines[i]);
+
+                // Fallback to simple split if robust one fails
+                if (potentialHeaders.length < 5) {
+                    potentialHeaders = splitLineSimple(lines[i]);
+                }
+                
+                // Standardize headers for checking
+                const standardizedHeaders = potentialHeaders.map(h => {
+                    let clean = h.replace(/[^A-Za-z0-9_]+/g, '_').trim();
+                    return clean.replace(/^_|_$/g, '');
+                });
+
+                // Check for a critical column to confirm it's the header
+                if (standardizedHeaders.includes('Unique_ID')) {
+                    headerIndex = i;
+                    rawHeaders = potentialHeaders;
+                    break;
+                }
+            }
+
+            if (headerIndex === -1) {
+                showMessageBox(`
+                    <p class="text-xl font-bold text-red-700 mb-3">FATAL PARSING ERROR: Header Not Found</p>
+                    <p class="text-left mb-4">The parser could not locate the required header row (containing 'Unique_ID', 'Name', etc.) within the first 5 lines of the file.</p>
+                    <p class="text-left mb-4">This usually happens when the exported file contains a lot of title or metadata rows before the actual data table, or if the column names themselves have been changed.</p>
+                    <p class="text-sm mt-4 text-red-600 font-medium">Please ensure the column names are preserved, especially **Unique_ID**, and try again after removing any non-data rows at the top of the file.</p>
+                `);
                 return [];
             }
 
-            // 4. Process Data Rows
+            const headerLength = rawHeaders.length;
+
+            const headers = rawHeaders.map(h => {
+                let clean = h.replace(/[^A-Za-z0-9_]+/g, '_').trim();
+                return clean.replace(/^_|_$/g, ''); // Remove leading/trailing underscores
+            });
+            
+            // Validate CRITICAL required columns (These must exist for any meaningful audit)
+            const required_cols_critical = ['Unique_ID', 'Name', 'Duration', 'Finish_Date', 'Predecessors', 'Successors', 
+                                   'Constraint_Type', 'Total_Slack', 'Milestone'];
+            const missing_cols = required_cols_critical.filter(col => !headers.includes(col));
+            
+            if (missing_cols.length > 0) {
+                showMessageBox(`FATAL ERROR: Missing **critical** required columns in the file: ${missing_cols.join(', ')}. Please ensure your export includes these fields.`);
+                return [];
+            }
+            
+            // Check for the OPTIONAL Percent_Complete column
+            // We check for 'Percent_Complete' or 'Percent_Complete_Numeric' if the latter exists (MS Project exports can be variable)
+            const percentColName = headers.find(h => h === 'Percent_Complete' || h.includes('Percent_Complete'));
+            if (percentColName) {
+                hasPercentCompleteColumn = true;
+            } else {
+                 console.warn("Optional column 'Percent_Complete' is missing. Overdue check will be skipped.");
+            }
+            
+
+            // Identify potential manual mode column (best effort)
+            const manual_col = headers.find(h => h.includes('Scheduling_Mode') || h.includes('Manual'));
+
+
+            // 4. Process Data Rows (Start *after* the identified header line)
             const data = [];
-            for (let i = 1; i < lines.length; i++) {
-                const values = splitLine(lines[i]);
+            let firstSkippedRowContent = null;
+            let firstSkippedRowIndex = -1;
+
+            for (let i = headerIndex + 1; i < lines.length; i++) {
+                let values = splitLineRegex(lines[i]);
                 
-                if (values.length === headers.length) {
+                // Fallback to simple split if the robust regex failed to match the expected number of columns.
+                if (values.length !== headerLength) {
+                    console.warn(`Robust parser failed on row ${i+1} (${values.length} columns != ${headerLength}). Attempting simple split...`);
+                    values = splitLineSimple(lines[i]); // Re-assign values with simple split
+                }
+                
+                if (values.length === headerLength) {
                     const row = {};
                     values.forEach((val, j) => {
                         row[headers[j]] = val;
                     });
+                    
+                    // Inject a standardized manual mode check field
+                    row.Scheduling_Mode = manual_col ? row[manual_col] : '';
+
                     data.push(row);
                 } else {
-                    // Log mismatch to console for advanced debugging
-                    console.warn(`Skipping row ${i+1} due to column count mismatch (${values.length} != ${headers.length}). Row content starts with: ${lines[i].substring(0, 100)}...`);
+                    // Log mismatch and record the first failure
+                    if (firstSkippedRowIndex === -1) {
+                         firstSkippedRowContent = lines[i];
+                         firstSkippedRowIndex = i + 1;
+                    }
+                    console.warn(`Skipping row ${i+1} due to unrecoverable column count mismatch (${values.length} != ${headerLength}). Row content starts with: ${lines[i].substring(0, 100)}...`);
                 }
             }
+
+            // --- Post-processing Diagnostic Check ---
+            // If we have data lines but failed to successfully parse any of them, show the diagnostic message.
+            if (lines.length > headerIndex + 1 && data.length === 0) {
+                 const contentPreview = firstSkippedRowContent ? firstSkippedRowContent.substring(0, 80) : "No data lines could be read.";
+                 
+                 showMessageBox(`
+                    <p class="text-xl font-bold text-red-700 mb-3">FATAL PARSING ERROR: Total Data Failure</p>
+                    <p class="text-left mb-4">The file's header has ${headerLength} columns, but **all** data rows failed to match this count. This indicates a consistent issue with how the data is being delimited.</p>
+                    <p class="text-left mb-4">The first parsing error occurred at **Line ${firstSkippedRowIndex}** in your file. This is typically caused by:
+                    <ul class="list-disc list-inside text-sm mt-2 ml-4">
+                        <li>An **unquoted comma** inside a field (like a Task Name).</li>
+                        <li>An **embedded newline/carriage return** within a field.</li>
+                    </ul>
+                    </p>
+                    <p class="text-sm font-semibold text-left p-3 bg-gray-100 rounded-lg overflow-x-auto break-all">
+                        <span class="text-gray-600">Preview of problematic line:</span> "${contentPreview}..."
+                    </p>
+                    <p class="text-sm mt-4 text-red-600 font-medium">Please manually open your CSV/TSV file, inspect Line ${firstSkippedRowIndex}, and correct the data anomaly (e.g., wrap the problematic field in double quotes).
+                    </p>
+                 `);
+                 
+                 return []; // Return empty data
+            }
+            
             return data;
         }
 
+        // --- GAO Audit Logic (VBA & GAO Checks) ---
 
-        // --- GAO Audit Logic (JavaScript Implementation of Python Checks) ---
-
-        function runGAOAudit(data) {
+        function runGAOAudit(data, statusDate) {
             console.log(`Analyzing ${data.length} tasks...`);
             totalTaskCount = data.length;
             
@@ -282,28 +477,75 @@
             data.forEach(task => {
                 task.Duration_Numeric = cleanDurationOrSlack(task.Duration);
                 task.Slack_Numeric = cleanDurationOrSlack(task.Total_Slack);
-                // Note: The file uses 'Yes'/'No' for Milestone.
+                // Only clean if the column was found, otherwise defaults to 0
+                task.Percent_Complete_Numeric = hasPercentCompleteColumn ? cleanPercentComplete(task.Percent_Complete) : 0; 
+                task.Finish_Date_Object = new Date(task.Finish_Date);
                 task.Is_Milestone = String(task.Milestone).toLowerCase().includes('yes');
+                
+                // Check if the task is a summary task (simple heuristic, not perfect without a dedicated column)
+                task.Is_Summary = task.Duration_Numeric === 0 && !task.Is_Milestone && task.Predecessors.length > 0 && task.Successors.length > 0;
             });
 
             const qa_results = {};
 
-            // 2.1 GAO Check: Logic/Dangling Activities (BP 2)
+            // --- VBA Checks Implemented ---
+            
+            // V1. Task Name Too Short (VBA Check)
+            qa_results['Task_Name_Short'] = data.filter(task => 
+                !task.Is_Summary && task.Name.trim().length < 10
+            ).map(task => ({
+                'Unique_ID': task.Unique_ID, 
+                'Name': task.Name, 
+                'Name_Length': task.Name.trim().length
+            }));
+            
+            // V2. Manual Tasks (VBA Check - Mapping to Scheduling_Mode)
+            qa_results['Manual_Tasks'] = data.filter(task => 
+                String(task.Scheduling_Mode).toLowerCase().includes('manual')
+            ).map(task => ({
+                'Unique_ID': task.Unique_ID, 
+                'Name': task.Name, 
+                'Scheduling_Mode': task.Scheduling_Mode || 'Manual (Assumed)'
+            }));
+
+            // V3. Potential Overdue (VBA Check) - CONDITIONAL
+            if (hasPercentCompleteColumn) {
+                qa_results['Overdue_Tasks'] = data.filter(task => {
+                    // Must be a valid date, not 100% complete, and finish date must be before status date
+                    return !isNaN(task.Finish_Date_Object) &&
+                           task.Percent_Complete_Numeric !== 100 && 
+                           task.Finish_Date_Object < statusDate;
+                }).map(task => ({
+                    'Unique_ID': task.Unique_ID, 
+                    'Name': task.Name, 
+                    'Finish_Date': task.Finish_Date,
+                    'Percent_Complete': task.Percent_Complete
+                }));
+            } else {
+                 qa_results['Skipped_Overdue_Tasks'] = [{
+                    'Status': 'Not Performed',
+                    'Reason': 'The column "Percent_Complete" was missing from the file header.',
+                    'Action_Needed': 'Re-export your schedule data including "Percent Complete" to enable this critical check.'
+                }];
+            }
+
+
+            // --- Existing GAO Checks ---
+
+            // GAO Check: Logic/Dangling Activities (BP 2)
             qa_results['Dangling_Activities'] = data.filter(task => 
-                !task.Is_Milestone && 
+                !task.Is_Milestone && !task.Is_Summary &&
                 (!task.Predecessors || task.Predecessors === '') && 
                 (!task.Successors || task.Successors === '')
             ).map(task => ({
                 'Unique_ID': task.Unique_ID, 
                 'Name': task.Name, 
-                'Duration': task.Duration, 
-                'Predecessors': task.Predecessors, 
-                'Successors': task.Successors
+                'Predecessors': task.Predecessors || 'None', 
+                'Successors': task.Successors || 'None'
             }));
 
 
-            // 2.2 GAO Check: Hard Constraints (BP 10)
-            const hard_constraint_types = ['Must Start On', 'Must Finish On', 'Start No Earlier Than', 'Finish No Earlier Than'];
+            // GAO Check: Hard Constraints (BP 10)
             qa_results['Hard_Constraints'] = data.filter(task => 
                 String(task.Constraint_Type).trim().includes('Start') || String(task.Constraint_Type).trim().includes('Finish')
             ).map(task => ({
@@ -313,20 +555,20 @@
                 'Constraint_Date': task.Constraint_Date || 'NA'
             }));
 
-            // 2.3 GAO Check: Duration Issues (BP 4)
+            // GAO Check: Duration Issues (BP 4)
             qa_results['Long_Duration_Tasks'] = data.filter(task => 
-                task.Duration_Numeric > 60 && !task.Is_Milestone
+                task.Duration_Numeric > 60 && !task.Is_Milestone && !task.Is_Summary
             ).map(task => ({ 'Unique_ID': task.Unique_ID, 'Name': task.Name, 'Duration': task.Duration }));
             
             qa_results['Estimated_Duration_Tasks'] = data.filter(task => 
-                String(task.Duration).includes('?') && !task.Is_Milestone
+                String(task.Duration).includes('?') && !task.Is_Milestone && !task.Is_Summary
             ).map(task => ({ 'Unique_ID': task.Unique_ID, 'Name': task.Name, 'Duration': task.Duration }));
             
             qa_results['Zero_Duration_Non_Milestones'] = data.filter(task => 
                 task.Duration_Numeric === 0 && !task.Is_Milestone
             ).map(task => ({ 'Unique_ID': task.Unique_ID, 'Name': task.Name, 'Duration': task.Duration, 'Milestone': task.Milestone }));
 
-            // 2.4 GAO Check: Slack Issues (BP 5)
+            // GAO Check: Slack Issues (BP 5)
             qa_results['Negative_Slack_Tasks'] = data.filter(task => 
                 task.Slack_Numeric < 0
             ).map(task => ({ 
@@ -364,27 +606,64 @@
             findingCardsContainer.innerHTML = '';
             
             let totalFindings = 0;
-            let criticalFindings = 0; // Dangling & Negative Slack
+            let criticalFindings = 0; 
+            let highPriorityFindings = 0;
             let passingChecks = 0;
+            let checkCount = 0;
 
             Object.entries(results).forEach(([key, findings]) => {
+                // Don't render Critical_Path_Tasks as a finding card, it's just a summary
+                if (key === 'Critical_Path_Tasks') return;
+                
+                checkCount++;
                 const count = findings.length;
                 const checkInfo = CHECK_MAP[key];
-                const isCritical = checkInfo.color === 'bg-red-500';
                 
+                // Special handling for the skipped check
+                if (key === 'Skipped_Overdue_Tasks') {
+                    // Skipped check is always rendered but doesn't count towards total findings
+                    const skippedCard = document.createElement('div');
+                    skippedCard.className = `bg-gray-100 p-5 rounded-xl border-t-8 border-gray-400 shadow-lg`;
+                    skippedCard.innerHTML = `
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-xl font-semibold text-gray-700 flex items-center">
+                                <span class="mr-3 text-2xl">${checkInfo.icon}</span>
+                                ${checkInfo.title}
+                            </h3>
+                            <div class="text-sm font-medium p-1 px-3 rounded-full bg-gray-200 text-gray-700">
+                                SKIPPED
+                            </div>
+                        </div>
+                        <div class="pt-4 text-gray-600">
+                             <p><strong>Reason:</strong> ${findings[0].Reason}</p>
+                             <p class="mt-2"><strong>Action:</strong> ${findings[0].Action_Needed}</p>
+                        </div>
+                    `;
+                    findingCardsContainer.appendChild(skippedCard);
+                    return;
+                }
+
+                // Normal finding logic continues here
+                const isCritical = checkInfo.color === 'bg-red-500';
+
                 totalFindings += count;
                 if (isCritical) {
                     criticalFindings += count;
+                } else if (count > 0) {
+                    highPriorityFindings += count;
                 }
 
-                if (count === 0 && !key.includes('Critical_Path')) {
+                if (count === 0) {
                     passingChecks++;
                 }
+                
+                // Determine card border color based on finding severity
+                const borderColor = isCritical ? 'border-red-500' : 'border-yellow-500';
                 
                 // Create Card Element
                 const card = document.createElement('div');
                 card.id = `card-${key}`;
-                card.className = `finding-card bg-white p-5 rounded-xl border-t-8 ${isCritical ? 'border-red-500' : 'border-yellow-500'} shadow-lg`;
+                card.className = `finding-card bg-white p-5 rounded-xl border-t-8 ${borderColor} shadow-lg`;
                 
                 // Card Header
                 const header = `
@@ -434,7 +713,7 @@
                 } else {
                      detailBody = `
                         <div id="details-${key}" class="pt-4">
-                            <p class="text-base text-green-600 font-medium">No issues found for this check. The schedule meets the GAO Best Practice for this category!</p>
+                            <p class="text-base text-green-600 font-medium">No issues found for this check. The schedule meets the criteria for this category!</p>
                         </div>
                     `;
                 }
@@ -447,8 +726,9 @@
             // Update Summary Stats
             document.getElementById('totalTasks').textContent = totalTaskCount;
             document.getElementById('criticalFindings').textContent = criticalFindings;
-            document.getElementById('hardConstraints').textContent = results['Hard_Constraints'].length;
-            document.getElementById('passingChecks').textContent = passingChecks;
+            document.getElementById('highPriorityFindings').textContent = highPriorityFindings;
+            // The passing checks count doesn't include the skipped one in the total count of checks performed
+            document.getElementById('passingChecks').textContent = passingChecks; 
 
             summarySection.classList.remove('hidden');
             detailsSection.classList.remove('hidden');
