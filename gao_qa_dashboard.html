@@ -1,0 +1,471 @@
+
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GAO Schedule QA Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+        }
+        .container-card {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .finding-card {
+            transition: transform 0.2s ease-in-out;
+            cursor: pointer;
+        }
+        .finding-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+        .hidden-detail {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.5s ease-out;
+        }
+        .open-detail {
+            max-height: 500vh; /* Large value to allow content to expand */
+            transition: max-height 1.0s ease-in-out;
+            padding-top: 1rem;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8">
+
+    <div class="max-w-7xl mx-auto">
+        <header class="text-center mb-10">
+            <h1 class="text-4xl font-extrabold text-blue-700">Project Schedule QA Dashboard</h1>
+            <p class="text-lg text-gray-600 mt-2">GAO Best Practices Quick Check (Client-Side Analysis)</p>
+        </header>
+
+        <!-- File Input and Controls -->
+        <div class="bg-white p-6 rounded-xl container-card mb-10">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">1. Load Schedule Data</h2>
+            <div class="flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-4">
+                <input type="file" id="scheduleFile" accept=".csv, .tsv" class="block w-full text-sm text-gray-500
+                    file:mr-4 file:py-2 file:px-4
+                    file:rounded-full file:border-0
+                    file:text-sm file:font-semibold
+                    file:bg-blue-50 file:text-blue-700
+                    hover:file:bg-blue-100" />
+                <button id="runAuditBtn" onclick="processFile()" class="w-full sm:w-auto px-6 py-2 bg-green-600 text-white font-semibold rounded-full hover:bg-green-700 transition duration-150 shadow-md disabled:opacity-50" disabled>
+                    Run GAO Audit
+                </button>
+            </div>
+            <p id="fileStatus" class="mt-3 text-sm text-red-500 font-medium"></p>
+            <p class="text-sm text-gray-500 mt-2">**Please use a **CSV (.csv)** or **TSV (.tsv)** file for reliable parsing. XLSX files are complex for in-browser analysis.</p>
+        </div>
+
+        <!-- Summary Statistics -->
+        <div id="summarySection" class="hidden bg-white p-6 rounded-xl container-card mb-10">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">2. Audit Summary</h2>
+            <div id="statsGrid" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="bg-blue-50 p-4 rounded-xl text-center">
+                    <p class="text-3xl font-bold text-blue-700" id="totalTasks">0</p>
+                    <p class="text-sm text-blue-600 font-medium">Total Tasks</p>
+                </div>
+                <div class="bg-red-50 p-4 rounded-xl text-center">
+                    <p class="text-3xl font-bold text-red-700" id="criticalFindings">0</p>
+                    <p class="text-sm text-red-600 font-medium">Critical Findings</p>
+                </div>
+                <div class="bg-yellow-50 p-4 rounded-xl text-center">
+                    <p class="text-3xl font-bold text-yellow-700" id="hardConstraints">0</p>
+                    <p class="text-sm text-yellow-600 font-medium">Hard Constraints</p>
+                </div>
+                <div class="bg-green-50 p-4 rounded-xl text-center">
+                    <p class="text-3xl font-bold text-green-700" id="passingChecks">0</p>
+                    <p class="text-sm text-green-600 font-medium">Passing Checks</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detailed Findings -->
+        <div id="detailsSection" class="hidden">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">3. Detailed Findings</h2>
+            <div id="findingCardsContainer" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Finding Cards will be injected here -->
+            </div>
+        </div>
+        
+    </div>
+
+    <!-- Message Box -->
+    <div id="messageBox" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden items-center justify-center p-4 z-50">
+        <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full text-center">
+            <p id="messageContent" class="text-lg font-medium text-gray-800 mb-4"></p>
+            <button onclick="closeMessageBox()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition duration-150">
+                Acknowledge
+            </button>
+        </div>
+    </div>
+
+
+    <script>
+        const fileInput = document.getElementById('scheduleFile');
+        const runAuditBtn = document.getElementById('runAuditBtn');
+        const fileStatus = document.getElementById('fileStatus');
+        const summarySection = document.getElementById('summarySection');
+        const detailsSection = document.getElementById('detailsSection');
+        const findingCardsContainer = document.getElementById('findingCardsContainer');
+        const messageBox = document.getElementById('messageBox');
+        const messageContent = document.getElementById('messageContent');
+        
+        let rawFileContent = null;
+        let totalTaskCount = 0;
+
+        // Map GAO checks to visual categories
+        const CHECK_MAP = {
+            'Dangling_Activities': { title: 'Dangling Activities (BP 2)', color: 'bg-red-500', icon: '🔗' },
+            'Hard_Constraints': { title: 'Hard Constraints (BP 10)', color: 'bg-yellow-500', icon: '🔒' },
+            'Long_Duration_Tasks': { title: 'Long Duration (>60d) (BP 4)', color: 'bg-yellow-500', icon: '⏳' },
+            'Estimated_Duration_Tasks': { title: 'Estimated Durations (?) (BP 4)', color: 'bg-yellow-500', icon: '❓' },
+            'Zero_Duration_Non_Milestones': { title: 'Zero Duration Non-Milestones (BP 4)', color: 'bg-yellow-500', icon: '🛑' },
+            'Negative_Slack_Tasks': { title: 'Negative Slack (BP 5)', color: 'bg-red-500', icon: '🔻' },
+            'High_Slack_Tasks': { title: 'High Slack (>100d) (BP 5)', color: 'bg-yellow-500', icon: '⬆️' },
+            'Critical_Path_Tasks': { title: 'Critical Path Tasks (Slack=0)', color: 'bg-green-500', icon: '🟢' }
+        };
+
+        // --- Utility Functions ---
+
+        function cleanDurationOrSlack(value) {
+            if (value === null || value === undefined) return 0;
+            if (typeof value === 'number') return value;
+            
+            let cleaned = String(value).trim();
+            if (cleaned === 'NA' || cleaned === '') return 0;
+
+            // Remove non-numeric characters like "days", "?", "d", etc.
+            cleaned = cleaned.replace(/ days?|\?|d/gi, '').trim();
+
+            const num = parseFloat(cleaned);
+            return isNaN(num) ? 0 : num;
+        }
+
+        function showMessageBox(message) {
+            messageContent.textContent = message;
+            messageBox.classList.remove('hidden');
+            messageBox.classList.add('flex');
+        }
+
+        function closeMessageBox() {
+            messageBox.classList.add('hidden');
+            messageBox.classList.remove('flex');
+        }
+
+        // --- File Handling ---
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                fileStatus.textContent = `File selected: ${fileInput.files[0].name}`;
+                runAuditBtn.disabled = false;
+            } else {
+                fileStatus.textContent = 'No file selected.';
+                runAuditBtn.disabled = true;
+            }
+        });
+
+        function processFile() {
+            const file = fileInput.files[0];
+            if (!file) {
+                showMessageBox("Please select a file to process.");
+                return;
+            }
+
+            // Check for file type (simple check)
+            const extension = file.name.split('.').pop().toLowerCase();
+            if (extension !== 'csv' && extension !== 'tsv') {
+                showMessageBox(`The file type .${extension} may not parse correctly. Please export your schedule to a delimited text file (CSV or TSV) for best results.`);
+            }
+
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                rawFileContent = e.target.result;
+                const scheduleData = parseCSV(rawFileContent);
+                if (scheduleData.length > 0) {
+                    runGAOAudit(scheduleData);
+                } else {
+                    // Check if the file content was actually empty
+                    if (rawFileContent.trim().length === 0) {
+                        showMessageBox("The file appears to be empty.");
+                    } else {
+                        showMessageBox("Could not parse schedule data. The most likely reason is a mismatch between the data's delimiter (comma or tab) and how quoted fields are handled. Please confirm your file is a standard CSV or TSV.");
+                    }
+                }
+            };
+
+            reader.onerror = () => {
+                showMessageBox("Error reading the file. Please try again.");
+            };
+
+            reader.readAsText(file);
+        }
+
+        /**
+         * Robust CSV/TSV parser that correctly handles fields enclosed in double quotes 
+         * which may contain the delimiter.
+         * @param {string} text - The entire file content.
+         * @returns {Array<Object>} The parsed data rows.
+         */
+        function parseCSV(text) {
+            // Split by line break, handling both LF and CRLF, and filter out empty lines
+            const lines = text.trim().split(/\r?\n/).filter(line => line.trim().length > 0);
+            if (lines.length <= 1) return [];
+
+            // 1. Determine Delimiter (default to comma)
+            let delimiter = ',';
+            if (lines[0].includes('\t')) {
+                delimiter = '\t';
+            }
+            const delim_esc = delimiter === ',' ? ',' : '\t'; // Escaped delimiter for regex
+
+            // 2. Create a robust parser function using the detected delimiter
+            // Regex explanation: 
+            // Splits on the delimiter only if it is followed by an even number of quotes, 
+            // ensuring the split happens outside of quoted fields.
+            const splitLine = (line) => {
+                // The pattern splits by the delimiter only if the delimiter is outside double quotes.
+                const regex = new RegExp(delim_esc + '(?=(?:(?:[^"]*"){2})*[^"]*$)', 'g');
+                // Split, then map to remove surrounding quotes and trim whitespace
+                return line.split(regex).map(field => field.replace(/^"|"$/g, '').trim()); 
+            };
+            
+            // 3. Extract and standardize headers
+            const rawHeaders = splitLine(lines[0]);
+            
+            const headers = rawHeaders.map(h => {
+                let clean = h.replace(/[^A-Za-z0-9_]+/g, '_').trim();
+                return clean.replace(/^_|_$/g, '');
+            });
+            
+            // Validate required columns (essential for the audit logic)
+            const required_cols = ['Unique_ID', 'Name', 'Duration', 'Predecessors', 'Successors', 
+                                   'Constraint_Type', 'Total_Slack', 'Milestone'];
+            const missing_cols = required_cols.filter(col => !headers.includes(col));
+            
+            if (missing_cols.length > 0) {
+                showMessageBox(`FATAL ERROR: Missing required columns in the file: ${missing_cols.join(', ')}. Please check your file's header names.`);
+                return [];
+            }
+
+            // 4. Process Data Rows
+            const data = [];
+            for (let i = 1; i < lines.length; i++) {
+                const values = splitLine(lines[i]);
+                
+                if (values.length === headers.length) {
+                    const row = {};
+                    values.forEach((val, j) => {
+                        row[headers[j]] = val;
+                    });
+                    data.push(row);
+                } else {
+                    // Log mismatch to console for advanced debugging
+                    console.warn(`Skipping row ${i+1} due to column count mismatch (${values.length} != ${headers.length}). Row content starts with: ${lines[i].substring(0, 100)}...`);
+                }
+            }
+            return data;
+        }
+
+
+        // --- GAO Audit Logic (JavaScript Implementation of Python Checks) ---
+
+        function runGAOAudit(data) {
+            console.log(`Analyzing ${data.length} tasks...`);
+            totalTaskCount = data.length;
+            
+            // First, process data for numeric and boolean flags
+            data.forEach(task => {
+                task.Duration_Numeric = cleanDurationOrSlack(task.Duration);
+                task.Slack_Numeric = cleanDurationOrSlack(task.Total_Slack);
+                // Note: The file uses 'Yes'/'No' for Milestone.
+                task.Is_Milestone = String(task.Milestone).toLowerCase().includes('yes');
+            });
+
+            const qa_results = {};
+
+            // 2.1 GAO Check: Logic/Dangling Activities (BP 2)
+            qa_results['Dangling_Activities'] = data.filter(task => 
+                !task.Is_Milestone && 
+                (!task.Predecessors || task.Predecessors === '') && 
+                (!task.Successors || task.Successors === '')
+            ).map(task => ({
+                'Unique_ID': task.Unique_ID, 
+                'Name': task.Name, 
+                'Duration': task.Duration, 
+                'Predecessors': task.Predecessors, 
+                'Successors': task.Successors
+            }));
+
+
+            // 2.2 GAO Check: Hard Constraints (BP 10)
+            const hard_constraint_types = ['Must Start On', 'Must Finish On', 'Start No Earlier Than', 'Finish No Earlier Than'];
+            qa_results['Hard_Constraints'] = data.filter(task => 
+                String(task.Constraint_Type).trim().includes('Start') || String(task.Constraint_Type).trim().includes('Finish')
+            ).map(task => ({
+                'Unique_ID': task.Unique_ID, 
+                'Name': task.Name, 
+                'Constraint_Type': task.Constraint_Type, 
+                'Constraint_Date': task.Constraint_Date || 'NA'
+            }));
+
+            // 2.3 GAO Check: Duration Issues (BP 4)
+            qa_results['Long_Duration_Tasks'] = data.filter(task => 
+                task.Duration_Numeric > 60 && !task.Is_Milestone
+            ).map(task => ({ 'Unique_ID': task.Unique_ID, 'Name': task.Name, 'Duration': task.Duration }));
+            
+            qa_results['Estimated_Duration_Tasks'] = data.filter(task => 
+                String(task.Duration).includes('?') && !task.Is_Milestone
+            ).map(task => ({ 'Unique_ID': task.Unique_ID, 'Name': task.Name, 'Duration': task.Duration }));
+            
+            qa_results['Zero_Duration_Non_Milestones'] = data.filter(task => 
+                task.Duration_Numeric === 0 && !task.Is_Milestone
+            ).map(task => ({ 'Unique_ID': task.Unique_ID, 'Name': task.Name, 'Duration': task.Duration, 'Milestone': task.Milestone }));
+
+            // 2.4 GAO Check: Slack Issues (BP 5)
+            qa_results['Negative_Slack_Tasks'] = data.filter(task => 
+                task.Slack_Numeric < 0
+            ).map(task => ({ 
+                'Unique_ID': task.Unique_ID, 
+                'Name': task.Name, 
+                'Slack': task.Total_Slack, 
+                'Constraint_Type': task.Constraint_Type, 
+                'Deadline': task.Deadline || 'NA'
+            }));
+            
+            qa_results['High_Slack_Tasks'] = data.filter(task => 
+                task.Slack_Numeric > 100
+            ).map(task => ({ 
+                'Unique_ID': task.Unique_ID, 
+                'Name': task.Name, 
+                'Slack': task.Total_Slack, 
+                'Predecessors': task.Predecessors, 
+                'Successors': task.Successors
+            }));
+            
+            qa_results['Critical_Path_Tasks'] = data.filter(task => 
+                task.Slack_Numeric === 0
+            ).map(task => ({ 
+                'Unique_ID': task.Unique_ID, 
+                'Name': task.Name, 
+                'Duration': task.Duration 
+            }));
+
+            renderResults(qa_results);
+        }
+
+        // --- Rendering Functions ---
+
+        function renderResults(results) {
+            findingCardsContainer.innerHTML = '';
+            
+            let totalFindings = 0;
+            let criticalFindings = 0; // Dangling & Negative Slack
+            let passingChecks = 0;
+
+            Object.entries(results).forEach(([key, findings]) => {
+                const count = findings.length;
+                const checkInfo = CHECK_MAP[key];
+                const isCritical = checkInfo.color === 'bg-red-500';
+                
+                totalFindings += count;
+                if (isCritical) {
+                    criticalFindings += count;
+                }
+
+                if (count === 0 && !key.includes('Critical_Path')) {
+                    passingChecks++;
+                }
+                
+                // Create Card Element
+                const card = document.createElement('div');
+                card.id = `card-${key}`;
+                card.className = `finding-card bg-white p-5 rounded-xl border-t-8 ${isCritical ? 'border-red-500' : 'border-yellow-500'} shadow-lg`;
+                
+                // Card Header
+                const header = `
+                    <div class="flex items-center justify-between" onclick="toggleDetails('${key}')">
+                        <h3 class="text-xl font-semibold text-gray-700 flex items-center">
+                            <span class="mr-3 text-2xl">${checkInfo.icon}</span>
+                            ${checkInfo.title}
+                        </h3>
+                        <div class="text-2xl font-bold p-2 rounded-full ${count > 0 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">
+                            ${count}
+                        </div>
+                    </div>
+                `;
+                
+                // Card Body/Details (Hidden by default)
+                let detailBody = '';
+                if (count > 0) {
+                    // Create Table Header based on the first finding's keys
+                    const headers = Object.keys(findings[0]);
+                    
+                    // Create Table Content (limit to first 10 for brevity)
+                    const tableRows = findings.slice(0, 10).map(item => {
+                        const rowCells = headers.map(header => 
+                            `<td class="px-2 py-1 border-b border-gray-200 text-sm text-gray-700">${item[header]}</td>`
+                        ).join('');
+                        return `<tr>${rowCells}</tr>`;
+                    }).join('');
+
+                    detailBody = `
+                        <div id="details-${key}" class="hidden-detail">
+                            <p class="text-sm text-gray-600 mb-2 font-medium">Showing first ${Math.min(10, count)} of ${count} findings:</p>
+                            <div class="overflow-x-auto rounded-lg border border-gray-200">
+                                <table class="min-w-full divide-y divide-gray-200">
+                                    <thead class="bg-gray-50">
+                                        <tr>
+                                            ${headers.map(h => `<th class="px-2 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">${h.replace(/_/g, ' ')}</th>`).join('')}
+                                        </tr>
+                                    </thead>
+                                    <tbody class="bg-white divide-y divide-gray-200 text-sm">
+                                        ${tableRows}
+                                    </tbody>
+                                </table>
+                            </div>
+                            ${count > 10 ? `<p class="text-xs text-gray-500 mt-2">...and ${count - 10} more. Uploading your original file is recommended for a full report.</p>` : ''}
+                        </div>
+                    `;
+                } else {
+                     detailBody = `
+                        <div id="details-${key}" class="pt-4">
+                            <p class="text-base text-green-600 font-medium">No issues found for this check. The schedule meets the GAO Best Practice for this category!</p>
+                        </div>
+                    `;
+                }
+
+
+                card.innerHTML = header + detailBody;
+                findingCardsContainer.appendChild(card);
+            });
+            
+            // Update Summary Stats
+            document.getElementById('totalTasks').textContent = totalTaskCount;
+            document.getElementById('criticalFindings').textContent = criticalFindings;
+            document.getElementById('hardConstraints').textContent = results['Hard_Constraints'].length;
+            document.getElementById('passingChecks').textContent = passingChecks;
+
+            summarySection.classList.remove('hidden');
+            detailsSection.classList.remove('hidden');
+            fileStatus.textContent = `Analysis complete! Found ${totalFindings} potential issues across ${totalTaskCount} tasks.`;
+        }
+        
+        function toggleDetails(key) {
+            const detailElement = document.getElementById(`details-${key}`);
+            if (detailElement.classList.contains('open-detail')) {
+                detailElement.classList.remove('open-detail');
+                detailElement.classList.add('hidden-detail');
+            } else {
+                detailElement.classList.remove('hidden-detail');
+                detailElement.classList.add('open-detail');
+            }
+        }
+
+    </script>
+</body>
+</html>
